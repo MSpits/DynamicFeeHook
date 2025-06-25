@@ -31,10 +31,6 @@ contract DynamicFeeHook is BaseHook {
     uint24 public constant MAX_FEE_BPS = 10000; // 1%
     uint24 public constant MIN_FEE_BPS = 100; // 0.01%
 
-    // Debug events for frontend or off-chain monitoring
-    event DebugPrices(uint256 oraclePrice, uint24 calculatedFee, uint24 protocolFee, uint24 lpFee);
-    event SqrtPriceDebug(int24 tick, uint160 sqrtPriceX96, uint160 referenceSqrtPriceX96);
-    event PriceDebug(uint256 price, uint256 referencePrice);
     event DynamicFeeApplied(uint24 fee);
 
     /// Error triggered if the pool is not using a dynamic fee
@@ -52,6 +48,7 @@ contract DynamicFeeHook is BaseHook {
     }
 
     /// @notice Allows the owner to update the oracle address
+    // Should be immutable to respect the "Uniswap view"
     function setOracle(address _oracle) external {
         require(msg.sender == owner, "Not owner");
         oracle = IOracle(_oracle);
@@ -63,12 +60,8 @@ contract DynamicFeeHook is BaseHook {
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        // Get the latest price from the oracle
-        (, int256 oraclePrice,,,) = oracle.latestRoundData();
-
         // Get current pool state
-        (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) =
-            StateLibrary.getSlot0(poolManager, key.toId());
+        (uint160 sqrtPriceX96,,,) = StateLibrary.getSlot0(poolManager, key.toId());
 
         // Convert oracle price to sqrtPriceX96 format
         uint160 referenceSqrtPriceX96 = _getReferencePriceX96(key.currency0, key.currency1);
@@ -77,45 +70,45 @@ contract DynamicFeeHook is BaseHook {
         uint24 newFee = _calculateDynamicFee(params.zeroForOne, sqrtPriceX96, referenceSqrtPriceX96);
 
         // Emit debugging information
-        emit DebugPrices(uint256(oraclePrice), newFee, protocolFee, lpFee);
-        emit SqrtPriceDebug(tick, sqrtPriceX96, referenceSqrtPriceX96);
         emit DynamicFeeApplied(newFee);
-
-        // Emit actual price and reference price for transparency
-        uint256 price = _getPriceFromSqrtX96(sqrtPriceX96);
-        uint256 referencePrice = _getPriceFromSqrtX96(referenceSqrtPriceX96);
-        emit PriceDebug(price, referencePrice);
 
         // Apply the new dynamic fee
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, newFee | LPFeeLibrary.OVERRIDE_FEE_FLAG);
     }
 
-    /// @notice Computes the dynamic fee based on price deviation and direction of the swap
+    /// @notice Computes the dynamic fee using a quadratic function based on deviation and swap direction
     function _calculateDynamicFee(bool zeroForOne, uint160 poolSqrtPriceX96, uint160 referenceSqrtPriceX96)
         internal
+        pure
         returns (uint24)
     {
-        // Compute absolute % difference between current and reference sqrt prices
         uint256 absPercentageDiffWad =
             SqrtPriceLibrary.absPercentageDifferenceWad(poolSqrtPriceX96, referenceSqrtPriceX96);
 
-        // Determine whether the swap direction leads to price convergence
         bool isConverging =
             zeroForOne ? poolSqrtPriceX96 > referenceSqrtPriceX96 : poolSqrtPriceX96 < referenceSqrtPriceX96;
 
-        // If swap is not converging (arbitrage), apply minimum fee
         if (!isConverging) {
             return MIN_FEE_BPS;
         }
 
-        // If deviation >= 2%, apply maximum fee
         uint256 threshold = 0.02e18;
+
         if (absPercentageDiffWad >= threshold) {
             return MAX_FEE_BPS;
         }
 
-        // Otherwise, linearly interpolate fee between MIN and MAX
-        uint24 dynamicFee = uint24(MIN_FEE_BPS + (absPercentageDiffWad * (MAX_FEE_BPS - MIN_FEE_BPS)) / threshold);
+        if (absPercentageDiffWad < 0.0001e18) {
+            return MIN_FEE_BPS;
+        }
+
+        uint256 ratioWad = (absPercentageDiffWad * 1e18) / threshold;
+        uint256 factor = (ratioWad * ratioWad) / 1e18;
+        uint256 feeDelta = (factor * (MAX_FEE_BPS - MIN_FEE_BPS)) / 1e18;
+        uint24 dynamicFee = uint24(MIN_FEE_BPS + feeDelta);
+
+        // safety check
+        assert(dynamicFee >= MIN_FEE_BPS && dynamicFee <= MAX_FEE_BPS);
 
         return dynamicFee;
     }

@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+/**
+ * @dev Utility functions for sqrtPriceX96 ↔ price and deviation in wad.
+ * Adapted from Uniswap v3/v4 core libraries (e.g. SqrtPriceMath) and
+ * typical DeFi community patterns for percentage-difference in wad format.
+ */
 
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
